@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      OLLAMA_URL: http://host.docker.internal:11434
+      PULSE_DATA_DIR: /data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - pulse-data:/data
+
+volumes:
+  pulse-data:
