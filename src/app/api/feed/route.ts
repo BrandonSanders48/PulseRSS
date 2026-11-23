@@ -4,14 +4,38 @@ import db from "@/lib/db";
 
 export const runtime = "nodejs";
 
+function normalizeFeedUrl(value: string) {
+  try {
+    const input = value.trim();
+    if (/^[a-z0-9][a-z0-9_-]{1,20}$/i.test(input)) {
+      return `https://www.reddit.com/r/${encodeURIComponent(input)}/.rss`;
+    }
+    const url = new URL(input);
+    if (/^r\/[a-z0-9_-]+\/?$/i.test(input.replace(/^\/+/, ""))) {
+      const name = input.replace(/^r\//i, "").replace(/\/+$/, "");
+      return `https://www.reddit.com/r/${encodeURIComponent(name)}/.rss`;
+    }
+    if (/(^|\.)reddit\.com$/i.test(url.hostname) && /^\/r\/[^/]+\/?(?:hot|new|top|rising)?\/?$/i.test(url.pathname)) {
+      const subreddit = url.pathname.split("/").filter(Boolean)[1];
+      if (subreddit) return `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/.rss`;
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 export async function POST(request: Request) {
   let url = "";
   try {
     const body = await request.json();
-    if (!body || typeof body.url !== "string" || !URL.canParse(body.url) || !["http:", "https:"].includes(new URL(body.url).protocol)) {
+    if (!body || typeof body.url !== "string" || !body.url.trim()) {
       return NextResponse.json({ error: "A feed URL is required" }, { status: 400 });
     }
-    url = body.url;
+    url = normalizeFeedUrl(body.url);
+    if (!URL.canParse(url) || !["http:", "https:"].includes(new URL(url).protocol)) {
+      return NextResponse.json({ error: "A valid feed URL is required" }, { status: 400 });
+    }
 
     const parser = new Parser();
     const response = await fetch(url, {

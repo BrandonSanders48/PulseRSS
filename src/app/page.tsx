@@ -183,6 +183,15 @@ function store(key: string, value: unknown) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* SQLite remains the source of truth. */ }
 }
 
+function subredditFeedUrl(value: string) {
+  const name = value.trim().replace(/^\/?r\//i, "").replace(/\/+$/, "");
+  return /^[a-z0-9][a-z0-9_-]{1,20}$/i.test(name)
+    ? `https://www.reddit.com/r/${encodeURIComponent(name)}/.rss`
+    : "";
+}
+
+type FullArticle = { key: string; title: string; text: string; url: string; source: string; loading: boolean; error: string };
+
 export default function Home() {
   const { feedback, notify, dismiss } = useFeedback();
   const [addingFeed, setAddingFeed] = useState(false);
@@ -251,6 +260,10 @@ export default function Home() {
   const [ollamaNoticeDismissed, setOllamaNoticeDismissed] = useState(false);
   const [ollamaTesting, setOllamaTesting] = useState(false);
   const [ollamaError, setOllamaError] = useState("");
+  const [subreddit, setSubreddit] = useState("");
+  const [fullArticle, setFullArticle] = useState<FullArticle>({
+    key: "", title: "", text: "", url: "", source: "", loading: false, error: "",
+  });
 
   useEffect(() => {
     const dialog = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).at(-1);
@@ -464,6 +477,12 @@ export default function Home() {
     return () => controller.abort();
   }, [feeds, activeProfileId, loadedProfileId, refreshRevision]);
 
+  useEffect(() => {
+    if (!activeProfileId || loadedProfileId !== activeProfileId) return;
+    const timer = window.setInterval(() => setRefreshRevision((current) => current + 1), 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [activeProfileId, loadedProfileId]);
+
   const todayArticles = useMemo(() => {
     const start = new Date(calendarDay);
     start.setHours(0, 0, 0, 0);
@@ -534,7 +553,12 @@ export default function Home() {
     (pickerCategory === "All" || source.category === pickerCategory) &&
     `${source.title} ${source.category}`.toLowerCase().includes(pickerSearch.trim().toLowerCase()),
   ), [pickerSearch, pickerCategory]);
-  const pendingFeedUrls = [...new Set([...selectedFeedUrls, ...(feedUrl.trim() ? [feedUrl.trim()] : [])])];
+  const subredditUrl = subredditFeedUrl(subreddit);
+  const pendingFeedUrls = [...new Set([
+    ...selectedFeedUrls,
+    ...(subredditUrl ? [subredditUrl] : []),
+    ...(feedUrl.trim() ? [feedUrl.trim()] : []),
+  ])];
 
   const feedCounts = useMemo(() => articles.reduce<Record<string, number>>((counts, article) => {
     if (article.feedUrl) counts[article.feedUrl] = (counts[article.feedUrl] || 0) + 1;
@@ -546,6 +570,10 @@ export default function Home() {
     selected, loadedProfileId === activeProfileId ? activeProfileId : null,
     ollamaSettings, selected?.digestContent !== undefined || preferences.autoSummarize, ollamaStatus === "available",
   );
+
+  useEffect(() => {
+    setFullArticle({ key: "", title: "", text: "", url: "", source: "", loading: false, error: "" });
+  }, [selected?.id]);
 
   function createProfile(event: React.FormEvent) {
     event.preventDefault();
@@ -658,6 +686,7 @@ export default function Home() {
         setFeeds((current) => [...new Map([...current, ...ordered].map((feed) => [feed.url, feed])).values()]);
         notify(added.length === 1 ? `Following ${added[0].title}` : `Following ${added.length} new feeds`);
       }
+      if (!failed.some((item) => item.url === subredditUrl)) setSubreddit("");
       setSelectedFeedUrls((current) => current.filter((url) => failed.some((item) => item.url === url)));
       if (!failed.some((item) => item.url === feedUrl.trim())) setFeedUrl("");
       setFailedFeedUrls(failed.map((item) => item.url));
@@ -756,6 +785,37 @@ export default function Home() {
         return;
       }
       await generateSummary(action, selected?.digestContent !== undefined);
+    }
+
+    async function loadFullArticle(article: Article) {
+      if (!article.link) return;
+      const key = article.id;
+      setFullArticle((current) => ({ ...current, key, loading: true, error: "", text: "" }));
+      try {
+        const response = await fetch("/api/article", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: article.link }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Could not extract the full article.");
+        setFullArticle({
+          key,
+          title: data.title || article.title,
+          text: data.text || "",
+          url: data.url || article.link,
+          source: data.source || "",
+          loading: false,
+          error: "",
+        });
+      } catch (error) {
+        setFullArticle((current) => ({
+          ...current,
+          key,
+          loading: false,
+          error: error instanceof Error ? error.message : "Could not extract the full article.",
+        }));
+      }
     }
 
     function archiveArticle(id: string) {
@@ -1073,7 +1133,27 @@ export default function Home() {
                   </div>
                 )}
 
-                {(selected.digestContent === undefined || !aiResult) && <p className="reading-copy mt-8 text-slate-700">{selected.digestContent !== undefined && !aiResult && ollamaStatus !== "available" ? "Connect Ollama in Settings to generate today’s digest." : selected.contentSnippet}</p>}
+                {(selected.digestContent === undefined || !aiResult) && (
+                  fullArticle.key === selected.id && fullArticle.text
+                    ? <div className="mt-8"><p className="mb-3 text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Full article{fullArticle.source ? ` · ${fullArticle.source}` : ""}</p><p className="reading-copy whitespace-pre-wrap text-slate-700">{fullArticle.text}</p></div>
+                    : <p className="reading-copy mt-8 text-slate-700">{selected.digestContent !== undefined && !aiResult && ollamaStatus !== "available" ? "Connect Ollama in Settings to generate today’s digest." : selected.contentSnippet}</p>
+                )}
+                {selected.digestContent === undefined && selected.link && (
+                  <button
+                    type="button"
+                    onClick={() => loadFullArticle(selected)}
+                    disabled={fullArticle.loading && fullArticle.key === selected.id}
+                    className="mt-6 flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    {fullArticle.loading && fullArticle.key === selected.id
+                      ? <LoaderCircle size={16} className="animate-spin" />
+                      : null}
+                    {fullArticle.loading && fullArticle.key === selected.id ? "Loading full article…" : "Load full article"}
+                  </button>
+                )}
+                {fullArticle.key === selected.id && fullArticle.error && (
+                  <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{fullArticle.error}</p>
+                )}
                 {selected.link && (
                   <a href={selected.link} target="_blank" rel="noreferrer" className="mt-8 inline-block rounded-lg bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800">
                     Read original article
@@ -1138,7 +1218,25 @@ export default function Home() {
                   )}
                 </div>
               )}
-              {(selected.digestContent === undefined || !aiResult) && <p className="reading-copy mt-7 text-slate-700">{selected.digestContent !== undefined && !aiResult && ollamaStatus !== "available" ? "Connect Ollama in Settings to generate today’s digest." : selected.contentSnippet}</p>}
+              {(selected.digestContent === undefined || !aiResult) && (
+                fullArticle.key === selected.id && fullArticle.text
+                  ? <div className="mt-7"><p className="mb-3 text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Full article{fullArticle.source ? ` · ${fullArticle.source}` : ""}</p><p className="reading-copy whitespace-pre-wrap text-slate-700">{fullArticle.text}</p></div>
+                  : <p className="reading-copy mt-7 text-slate-700">{selected.digestContent !== undefined && !aiResult && ollamaStatus !== "available" ? "Connect Ollama in Settings to generate today’s digest." : selected.contentSnippet}</p>
+              )}
+              {selected.digestContent === undefined && selected.link && (
+                <button
+                  type="button"
+                  onClick={() => loadFullArticle(selected)}
+                  disabled={fullArticle.loading && fullArticle.key === selected.id}
+                  className="mt-6 flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700"
+                >
+                  {fullArticle.loading && fullArticle.key === selected.id && <LoaderCircle size={16} className="animate-spin" />}
+                  {fullArticle.loading && fullArticle.key === selected.id ? "Loading full article…" : "Load full article"}
+                </button>
+              )}
+              {fullArticle.key === selected.id && fullArticle.error && (
+                <p role="alert" className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{fullArticle.error}</p>
+              )}
               {selected.link && (
                 <a href={selected.link} target="_blank" rel="noreferrer" className="mt-7 inline-block rounded-lg bg-slate-900 px-5 py-3 text-sm font-semibold text-white">
                   Read original article
@@ -1485,6 +1583,19 @@ export default function Home() {
                 })}
               </div>
               {!pickerSources.length && <p className="py-4 text-center text-sm text-slate-500">No matching sources. Try another search or add a custom URL below.</p>}
+              <label className="mt-4 block text-xs font-semibold uppercase tracking-wider text-slate-500">Subreddit</label>
+              <div className="mt-2 flex items-center rounded-lg border border-slate-200 focus-within:border-slate-400">
+                <span className="pl-3 text-sm text-slate-400">r/</span>
+                <input
+                  value={subreddit}
+                  onChange={(event) => { setSubreddit(event.target.value); setAddError(""); }}
+                  aria-label="Subreddit name"
+                  disabled={addingFeed}
+                  placeholder="technology"
+                  className="h-11 flex-1 rounded-r-lg px-2 text-sm outline-none"
+                />
+              </div>
+              <p className="mt-1 text-xs text-slate-500">Track new posts through Reddit&apos;s RSS feed. Choose multiple sources or enter a subreddit name.</p>
               <label className="mt-4 block text-xs font-semibold uppercase tracking-wider text-slate-500">Custom feed URL <span className="font-normal normal-case tracking-normal">(optional)</span></label>
               <input
                 autoFocus
