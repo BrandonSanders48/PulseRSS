@@ -131,42 +131,27 @@ const CYBER_SECURITY_SOURCES: (Feed & { category: string })[] = [
   { title: "Schneier on Security", url: "https://www.schneier.com/feed/atom/", color: "#dc2626", category: "Cyber security" },
   { title: "Bruce Schneier Security", url: "https://www.schneier.com/blog/atom.xml", color: "#dc2626", category: "Cyber security" },
   { title: "Cisco Security", url: "https://blogs.cisco.com/security/feed", color: "#dc2626", category: "Cyber security" },
-  { title: "Anton on Security", url: "https://news.google.com/rss/search?q=Anton%20on%20Security&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "Center for Internet Security", url: "https://www.cisecurity.org/feed", color: "#dc2626", category: "Cyber security" },
   { title: "CERT Recently Published Vulnerability Notes", url: "https://www.kb.cert.org/vuls/rss/vuls_rss.xml", color: "#dc2626", category: "Cyber security" },
   { title: "CISA Current Activity", url: "https://www.cisa.gov/cybersecurity-advisories/current-activity/rss.xml", color: "#dc2626", category: "Cyber security" },
-  { title: "Cloud Threat Landscape", url: "https://news.google.com/rss/search?q=cloud%20threat%20landscape&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "CyberScoop", url: "https://cyberscoop.com/feed/", color: "#dc2626", category: "Cyber security" },
-  { title: "Data and computer security", url: "https://news.google.com/rss/search?q=data%20and%20computer%20security&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "Darknet", url: "https://www.darknet.org.uk/feed/", color: "#dc2626", category: "Cyber security" },
-  { title: "Defense in Depth", url: "https://news.google.com/rss/search?q=Defense%20in%20Depth%20cybersecurity&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "Full Disclosure", url: "https://seclists.org/rss/fulldisclosure.rss", color: "#dc2626", category: "Cyber security" },
   { title: "Graham Cluley", url: "https://grahamcluley.com/feed/", color: "#dc2626", category: "Cyber security" },
   { title: "Have I Been Pwned", url: "https://feeds.feedburner.com/HaveIBeenPwnedLatestBreaches", color: "#dc2626", category: "Cyber security" },
   { title: "IT Security Guru", url: "https://www.itsecurityguru.org/feed/", color: "#dc2626", category: "Cyber security" },
   { title: "National Vulnerability Database", url: "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml", color: "#dc2626", category: "Cyber security" },
   { title: "Security Affairs", url: "https://securityaffairs.com/feed", color: "#dc2626", category: "Cyber security" },
-  { title: "Security Leadership and Management", url: "https://news.google.com/rss/search?q=security%20leadership%20management&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "The Exploit Database", url: "https://www.exploit-db.com/rss.xml", color: "#dc2626", category: "Cyber security" },
   { title: "The Verge", url: "https://www.theverge.com/rss/index.xml", color: "#dc2626", category: "Cyber security" },
   { title: "The CyberWire", url: "https://thecyberwire.com/feeds/rss.xml", color: "#dc2626", category: "Cyber security" },
-  { title: "Obyte", url: "https://news.google.com/rss/search?q=Obyte%20security&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "r/IntTechNews", url: "https://www.reddit.com/r/technews/.rss", color: "#dc2626", category: "Cyber security" },
   { title: "Security Intelligence", url: "https://securityintelligence.com/feed/", color: "#dc2626", category: "Cyber security" },
-  { title: "Targeted Threats", url: "https://news.google.com/rss/search?q=targeted%20threats%20cybersecurity&hl=en-US&gl=US&ceid=US:en", color: "#dc2626", category: "Cyber security" },
   { title: "ZDNet Security", url: "https://www.zdnet.com/topic/security/rss.xml", color: "#dc2626", category: "Cyber security" },
 ];
 
 const TECH_SOURCE_PICKER: (Feed & { category: string })[] = [
   ...CYBER_SECURITY_SOURCES,
-  ...FEED_CATEGORIES.flatMap((category) => {
-    return category.topics.map((topic) => ({
-      title: topic,
-      url: `https://news.google.com/rss/search?q=${encodeURIComponent(`${topic} when:7d`)}&hl=en-US&gl=US&ceid=US:en`,
-      color: category.color,
-      category: category.name,
-    }));
-  }),
 ];
 
 const DEFAULT_PREFERENCES = { compact: false, showLogos: true, notifications: true, autoSummarize: false };
@@ -188,6 +173,14 @@ function subredditFeedUrl(value: string) {
   return /^[a-z0-9][a-z0-9_-]{1,20}$/i.test(name)
     ? `https://www.reddit.com/r/${encodeURIComponent(name)}/.rss`
     : "";
+}
+
+function isGoogleNewsFeedUrl(value: string) {
+  try {
+    return new URL(value).hostname === "news.google.com";
+  } catch {
+    return false;
+  }
 }
 
 type FullArticle = { key: string; title: string; text: string; url: string; source: string; loading: boolean; error: string };
@@ -328,7 +321,8 @@ export default function Home() {
         if (controller.signal.aborted) return;
         const migrate = storedText("pulse-active-profile") === activeProfileId;
         const legacy = <T,>(key: string, fallback: T): T => migrate ? stored(key, fallback) : fallback;
-        setFeeds(data.exists ? data.feeds : legacy("pulse-feeds", DEFAULT_FEEDS));
+        const loadedFeeds = data.exists ? data.feeds : legacy("pulse-feeds", DEFAULT_FEEDS);
+        setFeeds((Array.isArray(loadedFeeds) ? loadedFeeds : []).filter((feed: Feed) => !isGoogleNewsFeedUrl(feed.url)));
         setFeedLists(data.exists ? data.lists : legacy("pulse-feed-lists", []));
         setWatchedKeywords(data.exists ? data.watched : legacy("pulse-watched-keywords", []));
         setPreferences({ ...DEFAULT_PREFERENCES, ...(data.exists ? data.settings.preferences : legacy("pulse-preferences", {})) });
@@ -659,6 +653,10 @@ export default function Home() {
       setAddError("You already follow this feed. Clear the custom URL or choose another source.");
       return;
     }
+    if (urls.some(isGoogleNewsFeedUrl)) {
+      setAddError("Google News feeds belong to Keyword watches. Add a Google News topic through the Watch section instead.");
+      return;
+    }
     setAddingFeed(true);
     setFailedFeedUrls([]);
     setFeedProgress({ done: 0, total: urls.length });
@@ -975,7 +973,7 @@ export default function Home() {
 
             <div className="flex items-center justify-between px-5 py-3">
               <h2 className="flex items-center gap-1 text-sm font-semibold">
-                {activeView === "today" ? "Today" : activeView === "readLater" ? "Read Later" : activeView === "saved" ? "Saved" : activeView === "recent" ? "Recently Read" : activeView === "watch" ? "Google Watch" : activeView === "list" ? feedLists.find((list) => list.id === activeFeed)?.name || "List" : activeView === "feed" ? activeFeed : "Latest"}
+                {activeView === "today" ? "Today" : activeView === "readLater" ? "Read Later" : activeView === "saved" ? "Saved" : activeView === "recent" ? "Recently Read" : activeView === "watch" ? "Google News" : activeView === "list" ? feedLists.find((list) => list.id === activeFeed)?.name || "List" : activeView === "feed" ? activeFeed : "Latest"}
               </h2>
               {activeView !== "watch" && <button type="button" disabled={loading} aria-busy={loading} onClick={() => setRefreshRevision((current) => current + 1)} className="rounded p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Refresh feeds" title="Refresh feeds">
                 <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
@@ -1386,8 +1384,9 @@ export default function Home() {
                           const data = await response.json();
                           if (!response.ok) throw new Error(data.error || "Could not import this file. Please try again.");
                           if (!data.imported) throw new Error("No feeds found. Choose an OPML file exported by an RSS reader.");
-                          setFeeds(data.feeds);
-                          notify(`Imported ${data.imported} ${data.imported === 1 ? "feed" : "feeds"}`);
+                          const feedsImported = data.feeds.filter((feed: Feed) => !isGoogleNewsFeedUrl(feed.url));
+                          setFeeds(feedsImported);
+                          notify(`Imported ${feedsImported.length} ${feedsImported.length === 1 ? "feed" : "feeds"}`);
                         } catch (error) {
                           setImportError(error instanceof Error ? error.message : "Connection failed. Please try again.");
                         } finally { setImporting(false); event.target.value = ""; }

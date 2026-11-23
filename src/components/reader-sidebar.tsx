@@ -36,7 +36,7 @@ export function ReaderSidebar(props: Props) {
     { view: "all" as const, label: "All articles", icon: Inbox, count: props.articleCount },
     { view: "today" as const, label: "Today", icon: Sun },
     { view: "recent" as const, label: "Recently Read", icon: History },
-    { view: "watch" as const, label: "Google Watch", icon: Bell, count: props.watchCount || undefined },
+    { view: "watch" as const, label: "Google News", icon: Bell, count: props.watchCount || undefined },
   ];
   return (
     <aside aria-label="Primary sidebar" className={`fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 flex-col border-r border-slate-200/80 bg-[#f6f7f9] transition-transform duration-200 lg:relative lg:z-0 lg:translate-x-0 ${props.open ? "translate-x-0" : "-translate-x-full"}`}>
