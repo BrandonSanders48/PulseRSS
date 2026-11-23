@@ -52,8 +52,19 @@ export function useArticleSummary(
           ollamaUrl: settings.url, ollamaModel: settings.model }),
         signal: controller.signal,
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Could not generate a summary. Please try again.");
+      const contentType = response.headers.get("content-type") || "";
+      const data = contentType.includes("application/json")
+        ? await response.json()
+        : null;
+      if (!response.ok) {
+        throw new Error(
+          data?.error ||
+          (response.status === 404
+            ? "The AI API route is unavailable. Check the app deployment."
+            : `The AI service returned an HTTP ${response.status} response.`),
+        );
+      }
+      if (!data) throw new Error("The AI API returned an invalid response.");
       if (!controller.signal.aborted) setState({ key, result: data.result, generatedAt: data.generatedAt || "", loading: false, error: "" });
     } catch (error) {
       if (!controller.signal.aborted) setState((current) => ({ ...current, loading: false,

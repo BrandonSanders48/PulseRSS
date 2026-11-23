@@ -87,6 +87,13 @@ ${content}`
         throw new OllamaUpstreamError(`Ollama request failed: ${detail}`);
       }
 
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        const detail = await response.text();
+        throw new OllamaUpstreamError(
+          `Ollama returned a non-JSON response: ${detail.slice(0, 200) || "empty response"}`,
+        );
+      }
       const data = await response.json();
       return typeof data.response === "string" ? data.response : "";
     }

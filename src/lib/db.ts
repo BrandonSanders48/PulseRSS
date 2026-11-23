@@ -8,6 +8,36 @@ const db = new Database(path.join(dataDir, "pulse.db"));
 db.pragma("journal_mode = WAL");
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS passkeys (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    counter INTEGER NOT NULL DEFAULT 0,
+    transports TEXT NOT NULL DEFAULT '[]',
+    device_name TEXT NOT NULL DEFAULT 'Passkey',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS webauthn_challenges (
+    id TEXT PRIMARY KEY,
+    account_id TEXT,
+    challenge TEXT NOT NULL,
+    type TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -67,6 +97,26 @@ db.exec(`
     generated_at TEXT NOT NULL,
     PRIMARY KEY (profile_id, day)
   );
+  CREATE TABLE IF NOT EXISTS cached_articles (
+    id TEXT PRIMARY KEY,
+    feed_url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    link TEXT NOT NULL DEFAULT '',
+    pub_date TEXT,
+    content TEXT NOT NULL DEFAULT '',
+    creator TEXT NOT NULL DEFAULT '',
+    fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS unread_articles (
+    profile_id TEXT NOT NULL,
+    article_id TEXT NOT NULL,
+    PRIMARY KEY (profile_id, article_id)
+  );
 `);
+
+const profileColumns = db.prepare("PRAGMA table_info(profiles)").all() as { name: string }[];
+if (!profileColumns.some((column) => column.name === "account_id")) {
+  db.exec("ALTER TABLE profiles ADD COLUMN account_id TEXT");
+}
 
 export default db;
