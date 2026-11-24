@@ -1,3 +1,4 @@
+import { authorize } from "@/lib/auth";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { NextResponse } from "next/server";
@@ -47,6 +48,8 @@ async function redditPost(url: URL, userAgent: string) {
 }
 
 export async function POST(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   const body = await request.json().catch(() => null);
   const url = safeUrl(body?.url);
   if (!url) return NextResponse.json({ error: "A valid article URL is required" }, { status: 400 });

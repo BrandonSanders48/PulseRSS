@@ -36,3 +36,15 @@ export async function sessionAccountId() {
   }
   return row.accountId;
 }
+
+// Return a response so every route can reject requests before accessing data.
+export async function authorize(profileId?: unknown) {
+  const accountId = await sessionAccountId();
+  if (!accountId) return Response.json({ error: "Sign in required" }, { status: 401 });
+  if (profileId !== undefined && (typeof profileId !== "string" || !db.prepare(
+    "SELECT 1 FROM profiles WHERE id = ? AND account_id = ?",
+  ).get(profileId, accountId))) {
+    return Response.json({ error: "Profile not found" }, { status: 404 });
+  }
+  return null;
+}

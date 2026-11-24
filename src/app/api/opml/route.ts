@@ -1,10 +1,15 @@
+import { authorize } from "@/lib/auth";
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
+  const denied = await authorize();
+  if (denied) return denied;
   const profileId = request.nextUrl.searchParams.get("profile") || "";
+  const forbidden = await authorize(profileId);
+  if (forbidden) return forbidden;
   const feeds = db.prepare("SELECT title, url FROM feeds WHERE profile_id = ?").all(profileId) as { title: string; url: string }[];
   const outlines = feeds.map((feed) =>
     `<outline text="${feed.title.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}" title="${feed.title.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}" type="rss" xmlUrl="${feed.url.replace(/&/g, "&amp;")}"/>`,
@@ -19,8 +24,12 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   const body = await request.text();
   const profileId = new URL(request.url).searchParams.get("profile") || "";
+  const forbidden = await authorize(profileId);
+  if (forbidden) return forbidden;
   const insert = db.prepare("INSERT INTO feeds (profile_id, title, url, color) VALUES (?, ?, ?, '#2563eb') ON CONFLICT(profile_id, url) DO UPDATE SET title=excluded.title");
   const outlines = body.match(/<outline[^>]*>/gi) || [];
   let imported = 0;

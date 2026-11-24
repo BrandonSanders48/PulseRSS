@@ -13,7 +13,7 @@ function rp(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => null) as { type?: unknown; response?: any } | null;
+  const body = await request.json().catch(() => null) as { type?: unknown; response?: Parameters<typeof verifyRegistrationResponse>[0]["response"] | Parameters<typeof verifyAuthenticationResponse>[0]["response"] } | null;
   if (!body || (body.type !== "register" && body.type !== "login") || !body.response) {
     return NextResponse.json({ error: "Invalid passkey response" }, { status: 400 });
   }
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     const challenge = db.prepare("SELECT challenge FROM webauthn_challenges WHERE account_id = ? AND type = 'register' AND expires_at > ? ORDER BY expires_at DESC LIMIT 1").get(accountId, new Date().toISOString()) as { challenge: string } | undefined;
     if (!challenge) return NextResponse.json({ error: "Registration challenge expired" }, { status: 400 });
     const result = await verifyRegistrationResponse({
-      response: body.response,
+      response: body.response as Parameters<typeof verifyRegistrationResponse>[0]["response"],
       expectedChallenge: challenge.challenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
       accountId,
       Buffer.from(result.registrationInfo.credential.publicKey).toString("base64"),
       result.registrationInfo.credential.counter,
-      JSON.stringify(body.response.response?.transports || body.response.transports || []),
+      JSON.stringify(("transports" in body.response.response ? body.response.response.transports : []) || []),
     );
     db.prepare("DELETE FROM webauthn_challenges WHERE account_id = ? AND type = 'register'").run(accountId);
     return NextResponse.json({ ok: true });
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
   const passkey = db.prepare("SELECT id, account_id AS accountId, public_key AS publicKey, counter, transports FROM passkeys WHERE id = ?").get(credentialId) as { id: string; accountId: string; publicKey: string; counter: number; transports: string } | undefined;
   if (!challenge || !passkey) return NextResponse.json({ error: "Passkey challenge expired or unknown" }, { status: 400 });
   const result = await verifyAuthenticationResponse({
-    response: body.response,
+    response: body.response as Parameters<typeof verifyAuthenticationResponse>[0]["response"],
     expectedChallenge: challenge.challenge,
     expectedOrigin: origin,
     expectedRPID: rpID,

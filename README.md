@@ -17,7 +17,7 @@ A responsive RSS reader built with Next.js, Tailwind CSS, SQLite, and Ollama.
 - Hundreds of technology and cybersecurity RSS sources
 - Custom RSS feeds, OPML import/export, and feed lists
 - Google News keyword and sentence watches
-- Local profiles with persistent subscriptions and preferences
+- Password-protected accounts with private subscriptions and preferences
 - Saved articles, Read Later, recently read history, and unread-style source counts
 - Daily AI briefing with Ollama
 - Search, category filters, source favicons, feed-health diagnostics, and browser notifications
@@ -55,8 +55,23 @@ Outside Docker, the default Ollama address is `http://localhost:11434`.
 SQLite stores profiles, subscriptions, lists, preferences, saved articles, read-later, and reading history.
 Docker keeps the database in the `pulse-data` volume. Local development uses `.data/pulse.db`;
 set `PULSE_DATA_DIR` to override it. Back up this database before removing the Docker volume.
-Existing browser data is migrated for the previously active profile when it is first loaded.
-Profiles are local identities, with no authentication; run this app on a trusted host/network.
+Create an account with an email address and a password of at least 10 characters, then sign in.
+Sessions use HttpOnly cookies and expire after 30 days; signing out revokes the session.
+All reader APIs require a session, and profile data is restricted to its owning account.
+Production deployments require HTTPS for secure session cookies.
+
+Legacy profiles without an account remain in the database but cannot be accessed from the UI.
+An operator must verify ownership and link each legacy profile to the correct account via its
+`profiles.account_id` value; matching an email address alone does not grant access.
+Back up the database before performing this migration.
+
+## Background article updates
+
+While Pulse is open, subscribed feeds refresh every five minutes without hiding the article
+list or changing the story being read. Returning to a stale tab or reconnecting also checks
+for updates. Failed feeds keep their previously loaded articles, and refresh requests do
+not overlap. Browsers may throttle timers in background tabs; Pulse catches up when you return.
+Feed polling stops when the app is closed.
 
 ## Daily digest
 

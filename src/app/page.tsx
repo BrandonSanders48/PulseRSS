@@ -215,6 +215,8 @@ export default function Home() {
   const [mobileDetail, setMobileDetail] = useState(false);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const readingArticle = useRef<Article | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [feedUrl, setFeedUrl] = useState("");
@@ -243,6 +245,9 @@ export default function Home() {
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [password, setPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [profileName, setProfileName] = useState("");
   const [profileEmail, setProfileEmail] = useState("");
   const [profileError, setProfileError] = useState("");
@@ -286,19 +291,12 @@ export default function Home() {
     let cancelled = false;
     async function bootstrap() {
       try {
-        const response = await fetch("/api/state");
-        if (!response.ok) throw new Error("Could not load profiles.");
+        const response = await fetch("/api/auth/me");
+        if (!response.ok) throw new Error("Could not check your session.");
         const data = await response.json();
         if (cancelled) return;
-        const legacy = stored<Profile[]>("pulse-profiles", []);
-        const merged: Profile[] = [...data.profiles];
-        for (const profile of Array.isArray(legacy) ? legacy : []) {
-          if (profile?.id && !merged.some((item) => item.id === profile.id)) merged.push(profile);
-        }
-        setProfiles(merged);
-        const last = storedText("pulse-active-profile-id") === null
-          ? storedText("pulse-active-profile") : stored<string | null>("pulse-active-profile-id", null);
-        setActiveProfileId(merged.some((profile) => profile.id === last) ? last : null);
+        setProfiles(data.authenticated && data.profile ? [data.profile] : []);
+        setActiveProfileId(data.authenticated ? data.profile?.id ?? null : null);
         setReady(true);
       } catch (error) {
         if (!cancelled) setSyncError(error instanceof Error ? error.message : "Could not load profiles.");
@@ -332,6 +330,9 @@ export default function Home() {
         setRecentlyRead(data.reading?.recentlyRead || legacy("pulse-recently-read", []));
         setArchivedArticles(data.reading?.articles || []);
         setArticles([]);
+        setLoading(true);
+        setFailedFeeds([]);
+        readingArticle.current = null;
         setSelectedFeedUrls([]); setFailedFeedUrls([]); setFeedUrl(""); setAddError("");
         setSelected(null);
         setWatchResults([]);
@@ -367,6 +368,7 @@ export default function Home() {
   }, [ready, loadedProfileId, activeProfile, feeds, feedLists, watchedKeywords, preferences, ollamaSettings, saved, readLater, recentlyRead, archivedArticles, articles, watchResults, saveRevision, importing]);
 
   useEffect(() => {
+    if (!activeProfile) return;
     let cancelled = false;
     fetch(`/api/ai?url=${encodeURIComponent(ollamaSettings.url)}`)
       .then((response) => response.json())
@@ -442,40 +444,66 @@ export default function Home() {
   useEffect(() => {
     if (!activeProfileId || loadedProfileId !== activeProfileId) return;
     const controller = new AbortController();
+    const interval = 5 * 60 * 1000;
+    let running = false;
+    let lastAttempt = 0;
+
     async function refresh() {
-      setLoading(true);
+      if (running || controller.signal.aborted || !navigator.onLine) return;
+      running = true;
+      lastAttempt = Date.now();
+      setRefreshing(true);
+      // Keep the current reader selection even when newer stories sort ahead of it.
+      setSelected((current) => current || readingArticle.current);
       const groups: PromiseSettledResult<Article[]>[] = [];
       for (let offset = 0; offset < feeds.length; offset += 4) {
         if (controller.signal.aborted) return;
         groups.push(...await Promise.allSettled(feeds.slice(offset, offset + 4).map(async (feed) => {
-        const response = await fetch("/api/feed", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: feed.url }), signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(feed.title);
-        const data = await response.json();
-        return data.articles.map((article: Omit<Article, "id" | "feedTitle">) => ({
-          ...article, id: `${feed.url}-${article.link || article.title}`,
-          feedTitle: data.title || feed.title, feedUrl: feed.url,
-        })) as Article[];
+          const response = await fetch("/api/feed", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: feed.url }), signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(feed.title);
+          const data = await response.json();
+          return data.articles.map((article: Omit<Article, "id" | "feedTitle">) => ({
+            ...article, id: `${feed.url}-${article.link || article.title}`,
+            feedTitle: data.title || feed.title, feedUrl: feed.url,
+          })) as Article[];
         })));
       }
       if (controller.signal.aborted) return;
-      setArticles((previous) => groups.flatMap((group, index) => group.status === "fulfilled"
-        ? group.value : previous.filter((article) => article.feedUrl === feeds[index].url))
-        .sort((a, b) => (Date.parse(b.pubDate || "") || 0) - (Date.parse(a.pubDate || "") || 0)));
+      setArticles((previous) => {
+        const next = groups.flatMap((group, index) => group.status === "fulfilled"
+          ? group.value : previous.filter((article) => article.feedUrl === feeds[index].url));
+        // A story may roll off its RSS source while someone is still reading it.
+        const reading = readingArticle.current;
+        if (reading?.feedUrl && feeds.some((feed) => feed.url === reading.feedUrl) && !next.some((article) => article.id === reading.id)) {
+          next.push(reading);
+        }
+        return next.sort((a, b) => (Date.parse(b.pubDate || "") || 0) - (Date.parse(a.pubDate || "") || 0));
+      });
       setFailedFeeds(groups.flatMap((group, index) => group.status === "rejected" ? [feeds[index].title] : []));
       setLoading(false);
+      setRefreshing(false);
+      running = false;
     }
+    const catchUp = () => {
+      if (document.visibilityState === "visible" && Date.now() - lastAttempt >= interval) void refresh();
+    };
+    const reconnect = () => { void refresh(); };
     void refresh();
-    return () => controller.abort();
+    const timer = window.setInterval(() => { void refresh(); }, interval);
+    window.addEventListener("focus", catchUp);
+    document.addEventListener("visibilitychange", catchUp);
+    window.addEventListener("online", reconnect);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", catchUp);
+      document.removeEventListener("visibilitychange", catchUp);
+      window.removeEventListener("online", reconnect);
+    };
   }, [feeds, activeProfileId, loadedProfileId, refreshRevision]);
-
-  useEffect(() => {
-    if (!activeProfileId || loadedProfileId !== activeProfileId) return;
-    const timer = window.setInterval(() => setRefreshRevision((current) => current + 1), 5 * 60 * 1000);
-    return () => window.clearInterval(timer);
-  }, [activeProfileId, loadedProfileId]);
 
   const todayArticles = useMemo(() => {
     const start = new Date(calendarDay);
@@ -566,32 +594,29 @@ export default function Home() {
   );
 
   useEffect(() => {
+    readingArticle.current = selected;
+  }, [selected]);
+
+  useEffect(() => {
     setFullArticle({ key: "", title: "", text: "", url: "", source: "", loading: false, error: "" });
   }, [selected?.id]);
 
-  function createProfile(event: React.FormEvent) {
+  async function createProfile(event: React.FormEvent) {
     event.preventDefault();
-    if (importing) { notify("Please wait for the import to finish"); return; }
-    const name = profileName.trim();
-    const email = profileEmail.trim();
-    if (!name) {
-      setProfileError("Enter a display name.");
-      return;
-    }
-    dismiss();
-    const profile: Profile = {
-      id: `${Date.now()}-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-      name,
-      email,
-      avatarColor: ["#2563eb", "#7c3aed", "#059669", "#db2777", "#ea580c"][profiles.length % 5],
-    };
-    setProfiles((current) => [...current, profile]);
-    setLoadedProfileId(null);
-    setActiveProfileId(profile.id);
-    setProfileName("");
-    setProfileEmail("");
+    if (authBusy) return;
+    setAuthBusy(true);
     setProfileError("");
-    setProfileOpen(false);
+    try {
+      const response = await fetch(`/api/auth/${authMode}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: profileName, email: profileEmail, password }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not sign in");
+      window.location.reload();
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Could not sign in");
+    } finally { setAuthBusy(false); }
   }
 
   function switchProfile(profileId: string) {
@@ -606,12 +631,12 @@ export default function Home() {
     setProfileOpen(false);
   }
 
-  function logoutProfile() {
+  async function logoutProfile() {
     if (importing) { notify("Please wait for the import to finish"); return; }
-    dismiss();
-    setLoadedProfileId(null);
-    setActiveProfileId(null);
-    setProfileOpen(true);
+    await saveQueue.current;
+    const response = await fetch("/api/auth/logout", { method: "POST" });
+    if (!response.ok) { notify("Could not sign out. Please retry."); return; }
+    window.location.reload();
   }
 
   function openListCreator() {
@@ -869,54 +894,21 @@ export default function Home() {
               <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-900 text-white">
                 <UserRound size={23} />
               </div>
-              <h1 className="text-center text-2xl font-semibold tracking-tight text-slate-900">
-                {profiles.length ? "Welcome back" : "Create your profile"}
-              </h1>
-              <p className="mt-2 text-center text-sm leading-6 text-slate-500">
-                {profiles.length ? "Choose a profile or create a new one." : "Set up your first local account for this Pulse container."}
-              </p>
-
-              {profiles.length > 0 && (
-                <div className="mt-5 grid gap-2">
-                  {profiles.map((profile) => (
-                    <button
-                      type="button"
-                      key={profile.id}
-                      onClick={() => switchProfile(profile.id)}
-                      className="flex items-center gap-3 rounded-xl border border-slate-200 px-3 py-3 text-left hover:border-slate-400"
-                    >
-                      <ProfileAvatar profile={profile} />
-                      <span>
-                        <span className="block text-sm font-semibold text-slate-800">{profile.name}</span>
-                        {profile.email && <span className="block text-xs text-slate-500">{profile.email}</span>}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <div className={profiles.length ? "mt-5 border-t border-slate-100 pt-5" : "mt-6"}>
-                <label className="text-xs font-semibold uppercase tracking-wider text-slate-500">Display name</label>
-                <input
-                  autoFocus
-                  value={profileName}
-                  onChange={(event) => setProfileName(event.target.value)}
-                  placeholder="Your name"
-                  className="mt-2 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
-                />
-                <label className="mt-4 block text-xs font-semibold uppercase tracking-wider text-slate-500">Email <span className="font-normal normal-case">(optional)</span></label>
-                <input
-                  type="email"
-                  value={profileEmail}
-                  onChange={(event) => setProfileEmail(event.target.value)}
-                  placeholder="you@example.com"
-                  className="mt-2 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-slate-400"
-                />
-                {profileError && <p className="mt-2 text-sm text-red-600">{profileError}</p>}
-                <button type="submit" className="mt-5 h-11 w-full rounded-lg bg-slate-900 text-sm font-semibold text-white">
-                  {profiles.length ? "Create another profile" : "Create profile"}
-                </button>
-              </div>
+              <h1 className="text-center text-2xl font-semibold">{authMode === "login" ? "Sign in to Pulse" : "Create your account"}</h1>
+              <p className="mt-2 text-center text-sm text-slate-500">Your feeds, saved articles, and settings are private to your account.</p>
+              {authMode === "register" && <label className="mt-5 block text-sm">Display name
+                <input required maxLength={80} autoComplete="name" value={profileName} onChange={(event) => setProfileName(event.target.value)} className="mt-1 h-11 w-full rounded-lg border px-3" />
+              </label>}
+              <label className="mt-5 block text-sm">Email
+                <input required type="email" autoComplete="username" value={profileEmail} onChange={(event) => setProfileEmail(event.target.value)} className="mt-1 h-11 w-full rounded-lg border px-3" />
+              </label>
+              <label className="mt-4 block text-sm">Password
+                <input required type="password" minLength={authMode === "register" ? 10 : undefined} autoComplete={authMode === "register" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} className="mt-1 h-11 w-full rounded-lg border px-3" />
+              </label>
+              {authMode === "register" && <p className="mt-1 text-xs text-slate-500">Use at least 10 characters.</p>}
+              {profileError && <p role="alert" className="mt-3 text-sm text-red-600">{profileError}</p>}
+              <button disabled={authBusy} type="submit" className="mt-5 h-11 w-full rounded-lg bg-slate-900 text-sm font-semibold text-white disabled:opacity-50">{authBusy ? "Please wait…" : authMode === "login" ? "Sign in" : "Create account"}</button>
+              <button type="button" disabled={authBusy} onClick={() => { setAuthMode(authMode === "login" ? "register" : "login"); setPassword(""); setProfileError(""); }} className="mt-4 w-full text-sm text-blue-600">{authMode === "login" ? "Create an account" : "Already have an account? Sign in"}</button>
             </form>
           </div>
         )}
@@ -975,8 +967,8 @@ export default function Home() {
               <h2 className="flex items-center gap-1 text-sm font-semibold">
                 {activeView === "today" ? "Today" : activeView === "readLater" ? "Read Later" : activeView === "saved" ? "Saved" : activeView === "recent" ? "Recently Read" : activeView === "watch" ? "Google News" : activeView === "list" ? feedLists.find((list) => list.id === activeFeed)?.name || "List" : activeView === "feed" ? activeFeed : "Latest"}
               </h2>
-              {activeView !== "watch" && <button type="button" disabled={loading} aria-busy={loading} onClick={() => setRefreshRevision((current) => current + 1)} className="rounded p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Refresh feeds" title="Refresh feeds">
-                <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+              {activeView !== "watch" && <button type="button" disabled={refreshing} aria-busy={refreshing} onClick={() => setRefreshRevision((current) => current + 1)} className="rounded p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Refresh feeds" title="Refresh feeds">
+                <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
               </button>}
             </div>
 
@@ -1273,10 +1265,10 @@ export default function Home() {
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => { setProfileOpen(false); setActiveProfileId(null); }}
+                  onClick={logoutProfile}
                   className="flex items-center justify-center gap-2 rounded-lg border border-slate-200 py-2.5 text-sm font-semibold text-slate-700"
                 >
-                  <UserRound size={16} /> Add profile
+                  <UserRound size={16} /> Use another account
                 </button>
                 <button
                   type="button"

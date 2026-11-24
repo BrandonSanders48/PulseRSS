@@ -1,3 +1,4 @@
+import { authorize } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import Parser from "rss-parser";
 import db from "@/lib/db";
@@ -26,6 +27,8 @@ function normalizeFeedUrl(value: string) {
 }
 
 export async function POST(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   let url = "";
   try {
     const body = await request.json();

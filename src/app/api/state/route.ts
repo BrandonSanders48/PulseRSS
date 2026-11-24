@@ -1,16 +1,21 @@
+import { authorize, sessionAccountId } from "@/lib/auth";
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
+  const denied = await authorize();
+  if (denied) return denied;
   const profileId = request.nextUrl.searchParams.get("profile");
   if (!profileId) {
     return NextResponse.json({
-      profiles: db.prepare("SELECT id, name, email, avatar_color AS avatarColor FROM profiles").all(),
+      profiles: db.prepare("SELECT id, name, email, avatar_color AS avatarColor FROM profiles WHERE account_id = ?").all(await sessionAccountId()),
     });
   }
 
+  const forbidden = await authorize(profileId);
+  if (forbidden) return forbidden;
   return NextResponse.json({
     exists: Boolean(db.prepare("SELECT 1 FROM profiles WHERE id = ?").get(profileId)),
     reading: (() => {
@@ -38,11 +43,15 @@ export async function GET(request: NextRequest) {
 }
 
 export async function PUT(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   const body = await request.json().catch(() => null);
   if (!validState(body)) {
     return NextResponse.json({ error: "Invalid profile state" }, { status: 400 });
   }
   const { profile, feeds, lists, watched, preferences, ollama, reading } = body;
+  const forbidden = await authorize(profile.id);
+  if (forbidden) return forbidden;
   try {
     db.transaction(() => {
       db.prepare("INSERT INTO profiles (id, name, email, avatar_color) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, email=excluded.email, avatar_color=excluded.avatar_color")

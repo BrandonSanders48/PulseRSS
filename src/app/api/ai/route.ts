@@ -1,3 +1,4 @@
+import { authorize } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import { dailyDigest, digestDay, savedDigest } from "@/lib/daily-digest";
 
@@ -12,11 +13,15 @@ function ollamaUrl(body: { ollamaUrl?: unknown }) {
 }
 
 export async function GET(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   try {
     const url = new URL(request.url);
     if (url.searchParams.get("action") === "digest") {
       const profileId = url.searchParams.get("profile");
       if (!profileId) return NextResponse.json({ error: "A profile is required" }, { status: 400 });
+      const forbidden = await authorize(profileId);
+      if (forbidden) return forbidden;
       let day: string;
       try { day = digestDay(url.searchParams.get("timeZone") || "UTC"); }
       catch { return NextResponse.json({ error: "Invalid time zone" }, { status: 400 }); }
@@ -38,10 +43,16 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   try {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object") return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     const { title, content, action = "summarize" } = body;
+    if (action === "digest") {
+      const forbidden = await authorize(body.profileId ?? null);
+      if (forbidden) return forbidden;
+    }
     if (!title && !content) {
       return NextResponse.json({ error: "Article text is required" }, { status: 400 });
     }

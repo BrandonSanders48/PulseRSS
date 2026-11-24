@@ -1,6 +1,23 @@
-import { test, expect } from "@playwright/test";
+import { test as base, expect, type APIRequestContext } from "@playwright/test";
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
+
+const test = base.extend({
+  request: async ({ context }, provide) => { await provide(context.request); },
+});
+const password = "test-password-123";
+async function signIn(request: APIRequestContext, payload: ReturnType<typeof state>) {
+  const response = await request.post("/api/auth/login", { data: { email: payload.profile.email, password } });
+  expect(response.ok()).toBeTruthy();
+}
+async function account(request: APIRequestContext, name: string) {
+  const payload = state(name);
+  payload.profile.email = `${randomUUID()}@example.com`;
+  const response = await request.post("/api/auth/register", { data: { name, email: payload.profile.email, password } });
+  expect(response.ok()).toBeTruthy();
+  payload.profile.id = (await response.json()).profileId;
+  return payload;
+}
 
 function state(name: string) {
   return {
@@ -15,7 +32,7 @@ function state(name: string) {
 }
 
 test("invalid saves and database failures preserve all previous profile data", async ({ request }) => {
-  const original = state("original");
+  const original = await account(request, "original");
   expect((await request.put("/api/state", { data: original })).ok()).toBeTruthy();
   const get = () => request.get(`/api/state?profile=${original.profile.id}`).then((r) => r.json());
   const before = await get();
@@ -23,9 +40,10 @@ test("invalid saves and database failures preserve all previous profile data", a
   expect(await get()).toEqual(before);
   expect((await request.put("/api/state", { data: "{" , headers: { "Content-Type": "application/json" } })).status()).toBe(400);
 
-  const other = state("other");
+  const other = await account(request, "other");
   other.lists = [{ id: randomUUID(), name: "Owned list", feedUrls: [] }];
   expect((await request.put("/api/state", { data: other })).ok()).toBeTruthy();
+  await signIn(request, original);
   // The global list primary key forces an error after feeds/settings were changed.
   const failed = await request.put("/api/state", { data: {
     ...original, profile: { ...original.profile, name: "changed" }, feeds: [], lists: other.lists,
@@ -35,21 +53,25 @@ test("invalid saves and database failures preserve all previous profile data", a
 });
 
 test("reading state and empty subscriptions survive reloads and remain isolated", async ({ request }) => {
-  const first = state("reading");
+  const first = await account(request, "reading");
   first.feeds = [];
   first.reading.saved = ["saved-article"];
   first.reading.readLater = ["saved-article"];
   first.reading.recentlyRead = ["saved-article"];
   first.reading.articles = [{ id: "saved-article", title: "Archived article", link: "https://example.com/article", pubDate: null, contentSnippet: "Snapshot", creator: "Author", feedTitle: "Feed" }];
-  const second = state("empty");
-  for (const payload of [first, second]) expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
+  const second = await account(request, "empty");
+  for (const payload of [first, second]) { await signIn(request, payload); expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy(); }
+  await signIn(request, first);
   const loaded = await request.get(`/api/state?profile=${first.profile.id}`).then((r) => r.json());
   expect(loaded.feeds).toEqual([]);
   expect(loaded.reading).toEqual(first.reading);
+  expect((await request.get(`/api/state?profile=${second.profile.id}`)).status()).toBe(404);
+  await signIn(request, second);
   expect((await request.get(`/api/state?profile=${second.profile.id}`).then((r) => r.json())).reading.saved).toEqual([]);
 });
 
 test("feed failures return JSON and update health; custom Ollama URL is honored", async ({ request }) => {
+  const payload = await account(request, "Feed tester");
   const mock = createServer(async (req, res) => {
     if (req.url === "/rss") {
       res.setHeader("Content-Type", "application/rss+xml");
@@ -73,6 +95,8 @@ test("feed failures return JSON and update health; custom Ollama URL is honored"
     const failed = await request.post("/api/feed", { data: { url } });
     expect(failed.status()).toBe(422);
     expect((await failed.json()).error).toContain("Could not load");
+    payload.feeds = [{ title: "Mock", url: new URL(url).href, color: "#2563eb" }];
+    expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
     const health = await request.get("/api/feed/health").then((r) => r.json());
     expect(JSON.stringify(health)).toContain(url);
     expect(JSON.stringify(health)).toContain("error");
@@ -82,60 +106,30 @@ test("feed failures return JSON and update health; custom Ollama URL is honored"
   } finally { await new Promise<void>((resolve, reject) => mock.close((e) => e ? reject(e) : resolve())); }
 });
 
-test("hydration and profile switching preserve subscriptions and saved articles", async ({ page, request }) => {
-  const first = state("Alice");
-  first.feeds.push({ title: "Broken feed", url: "https://example.com/broken", color: "#2563eb" });
-  const second = state("Bob");
-  second.feeds = [];
-  const third = state("Carol");
-  const payloads = [first, second, third];
-  for (const payload of payloads) expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
-  await page.addInitScript((id) => {
-    localStorage.setItem("pulse-active-profile-id", JSON.stringify(id));
-    localStorage.setItem("pulse-profiles", "invalid json");
-    localStorage.setItem("pulse-feeds", "invalid json");
-  }, first.profile.id);
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-  await page.route("**/api/ai?*", (route) => route.fulfill({ json: { available: true, models: ["llama3.2"] } }));
-  await page.route("**/api/feed", (route) => route.request().postDataJSON().url.endsWith("/broken")
-    ? route.abort()
-    : route.fulfill({ json: { title: "Test feed", articles: [{ title: "Test article", link: "https://example.com/article", pubDate: null, contentSnippet: "Article body", creator: "Author" }] } }));
-  await page.route("**/api/state", async (route) => {
-    if (route.request().method() !== "PUT") return route.continue();
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    await route.continue();
-  });
-  // Slow profile loading must not save the previous profile's data into it.
-  await page.route(`**/api/state?profile=${second.profile.id}`, async (route) => {
-    const response = await route.fetch();
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await route.fulfill({ response });
-  });
+test("sign-in UI creates accounts, restores sessions, and signs out", async ({ page, request }) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Test article" }).first()).toBeVisible();
-  await page.getByRole("button", { name: /Alice.*Local profile/ }).click();
-  await page.getByRole("dialog").getByRole("button", { name: /Alice/ }).click();
+  await page.getByRole("button", { name: "Create an account", exact: true }).click();
+  await page.getByLabel("Display name").fill("Alice");
+  const email = `${randomUUID()}@example.com`;
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Create your account" })).toBeHidden();
+  await expect.poll(async () => (await request.get("/api/auth/me").then(r => r.json())).authenticated).toBe(true);
+  await page.reload();
   await expect(page.getByRole("status", { name: "Loading profile" })).toBeHidden();
-  await page.getByRole("button", { name: "Bookmark article", exact: true }).first().click();
-  await page.getByRole("button", { name: /Alice.*Local profile/ }).click();
-  await page.getByRole("dialog").getByRole("button", { name: /Bob/ }).click();
-  await expect(page.getByRole("status", { name: "Loading profile" })).toBeHidden();
-  await expect(page.getByRole("heading", { name: "Test article" })).toHaveCount(0);
-  expect((await request.get(`/api/state?profile=${first.profile.id}`).then((r) => r.json())).reading.saved).toHaveLength(1);
-  expect((await request.get(`/api/state?profile=${second.profile.id}`).then((r) => r.json())).feeds).toEqual([]);
-  await page.getByRole("button", { name: /Bob.*Local profile/ }).click();
-  await page.getByRole("dialog").getByRole("button", { name: /Carol/ }).click();
-  await expect(page.getByRole("heading", { name: "Test article" }).first()).toBeVisible();
-  for (const payload of payloads) {
-    expect((await request.get(`/api/state?profile=${payload.profile.id}`).then((r) => r.json())).feeds).toEqual(payload.feeds);
-  }
-  expect(errors.filter((error) => !error.includes("net::ERR_FAILED"))).toEqual([]);
+  await page.getByRole("button", { name: /^Alice / }).click();
+  await page.getByRole("button", { name: "Log out", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sign in to Pulse" })).toBeVisible();
+  expect((await request.get("/api/state")).status()).toBe(401);
+  await page.getByLabel("Email", { exact: true }).fill(email);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sign in to Pulse" })).toBeHidden();
 });
 
 test("a fresh browser can read list snapshots without the original feed", async ({ page, request }) => {
-  const payload = state("Archive");
+  const payload = await account(request, "Archive");
   payload.feeds = [];
   payload.reading.saved = ["archived"];
   payload.reading.readLater = ["archived"];
@@ -155,7 +149,7 @@ test("a fresh browser can read list snapshots without the original feed", async 
 
 
 test("automatic summaries are optional, persist, and follow the viewed article", async ({ page, request }) => {
-  const payload = state("Automatic");
+  const payload = await account(request, "Automatic");
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("pulse-active-profile-id", JSON.stringify(id)), payload.profile.id);
   await page.route("**/api/ai?*", (route) => route.fulfill({ json: { available: true, models: [] } }));
@@ -199,7 +193,7 @@ test("automatic summaries are optional, persist, and follow the viewed article",
 
 
 test("Today starts with an automatic digest of all today's articles", async ({ page, request }) => {
-  const payload = state("Digest");
+  const payload = await account(request, "Digest");
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("pulse-active-profile-id", JSON.stringify(id)), payload.profile.id);
   await page.route("**/api/ai?*", (route) => route.fulfill({ json: { available: true, models: [] } }));
@@ -241,7 +235,7 @@ test("Today starts with an automatic digest of all today's articles", async ({ p
 
 
 test("Gravatar images normalize email and article sharing works on desktop and mobile", async ({ page, request }) => {
-  const payload = state("AvatarUser");
+  const payload = await account(request, "AvatarUser");
   payload.profile.email = "  AvatarUser@Example.COM  ";
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   const expectedHash = createHash("sha256").update("avataruser@example.com").digest("hex");
@@ -289,7 +283,7 @@ test("Gravatar images normalize email and article sharing works on desktop and m
 
 
 test("actions show progress, recover from errors, and support undo", async ({ page, request }) => {
-  const payload = state("Feedback"); payload.feeds = [];
+  const payload = await account(request, "Feedback"); payload.feeds = [];
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("pulse-active-profile-id", JSON.stringify(id)), payload.profile.id);
   await page.route("**/api/ai?*", (route) => route.fulfill({ json: { available: true, models: [] } }));
@@ -343,7 +337,7 @@ test("actions show progress, recover from errors, and support undo", async ({ pa
   await page.getByLabel("Import OPML", { exact: true }).setInputFiles({ name: "invalid.opml", mimeType: "text/xml", buffer: Buffer.from("<opml><body /></opml>") });
   await expect(dialog.getByRole("alert")).toContainText("No feeds found");
   await page.getByLabel("Import OPML", { exact: true }).setInputFiles({ name: "feeds.opml", mimeType: "text/xml", buffer: Buffer.from('<opml><body><outline text="Imported source" xmlUrl="https://example.com/imported" /></body></opml>') });
-  await expect(page.getByRole("status", { name: "Action feedback" })).toContainText("Imported 1 feed");
+  await expect(page.getByRole("status", { name: "Action feedback" })).toContainText("Imported 2 feeds");
   await expect(dialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: /^Imported source/ })).toBeVisible();
@@ -372,7 +366,7 @@ test("daily digests are saved once, regenerate explicitly, and survive failed re
   await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
   const address = mock.address(); if (!address || typeof address === "string") throw new Error("No mock port");
   const url = `http://127.0.0.1:${address.port}`;
-  const payload = state("PersistedDigest"); payload.ollama.url = url;
+  const payload = await account(request, "PersistedDigest"); payload.ollama.url = url;
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const data = { action: "digest", profileId: payload.profile.id, title: "Daily briefing", content: "Tech headline about AI. Security headline about a vulnerability.", ollamaUrl: url, timeZone };
@@ -389,8 +383,8 @@ test("daily digests are saved once, regenerate explicitly, and survive failed re
     expect(calls).toBe(1);
     expect(prompts[0]).toContain("Do NOT break down individual articles");
     for (const heading of ["Overview", "Tech news", "Cybersecurity", "Key points"]) expect(prompts[0]).toContain(heading);
-    expect((await request.get(`/api/ai?action=digest&profile=${randomUUID()}`)).ok()).toBeTruthy();
-    expect((await request.get(`/api/ai?action=digest&profile=${randomUUID()}`).then((r) => r.json())).result).toBeNull();
+    expect((await request.get(`/api/ai?action=digest&profile=${randomUUID()}`)).status()).toBe(404);
+
     // These two zones always fall on different calendar days; one cannot reuse today's row.
     const days = await Promise.all(["Pacific/Kiritimati", "Etc/GMT+12"].map((zone) => request.get(`/api/ai?action=digest&profile=${payload.profile.id}&timeZone=${encodeURIComponent(zone)}`).then((r) => r.json())));
     expect(days[0].day).not.toBe(days[1].day);
@@ -436,7 +430,7 @@ test("daily digests are saved once, regenerate explicitly, and survive failed re
 
 
 test("feed picker supports multiple selections, deduplicates, and retries partial failures", async ({ page, request }) => {
-  const payload = state("BulkFeeds"); payload.feeds = [];
+  const payload = await account(request, "BulkFeeds"); payload.feeds = [];
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("pulse-active-profile-id", JSON.stringify(id)), payload.profile.id);
   await page.route("**/api/ai?*", (route) => route.fulfill({ json: { available: true, models: [] } }));
@@ -481,7 +475,7 @@ test("feed picker supports multiple selections, deduplicates, and retries partia
 });
 
 test("sidebar combines selected feeds and supports deselecting and clearing", async ({ page, request }) => {
-  const payload = state("FeedSelection");
+  const payload = await account(request, "FeedSelection");
   payload.feeds = ["Alpha", "Beta", "Gamma"].map((title) => ({ title, url: `https://example.com/${title}`, color: "#2563eb" }));
   expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("pulse-active-profile-id", JSON.stringify(id)), payload.profile.id);
@@ -513,4 +507,90 @@ test("sidebar combines selected feeds and supports deselecting and clearing", as
   await expect(following.getByText("2 selected", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Close sidebar", exact: true }).click();
   await expect(cards).toHaveCount(2);
+});
+
+test("sessions enforce ownership across state, OPML, notifications, and digests", async ({ request, playwright }) => {
+  for (const url of ["/api/state", "/api/opml", "/api/feed/health", "/api/ai"]) {
+    expect((await request.get(url)).status()).toBe(401);
+  }
+  const alice = await account(request, "Private Alice");
+  expect((await request.put("/api/state", { data: alice })).ok()).toBeTruthy();
+  const cookie = (await request.storageState()).cookies.find(c => c.name === "pulse_session")!;
+  expect(cookie.httpOnly).toBe(true);
+  expect(cookie.sameSite).toBe("Lax");
+  const bobRequest = await playwright.request.newContext({ baseURL: "http://localhost:3217" });
+  try {
+    const bob = await account(bobRequest, "Private Bob");
+    expect((await bobRequest.get("/api/state").then(r => r.json())).profiles.map((p: { id: string }) => p.id)).toEqual([bob.profile.id]);
+    for (const url of [`/api/state?profile=${alice.profile.id}`, `/api/opml?profile=${alice.profile.id}`, `/api/ai?action=digest&profile=${alice.profile.id}`]) {
+      expect((await bobRequest.get(url)).status()).toBe(404);
+    }
+    expect((await bobRequest.put("/api/state", { data: alice })).status()).toBe(404);
+    expect((await bobRequest.post(`/api/opml?profile=${alice.profile.id}`, { data: "<opml/>" })).status()).toBe(404);
+    expect((await bobRequest.post("/api/notifications", { data: { profileId: alice.profile.id, title: "Attack" } })).status()).toBe(404);
+    expect((await bobRequest.put("/api/notifications", { data: { profileId: alice.profile.id } })).status()).toBe(404);
+    expect((await bobRequest.post("/api/ai", { data: { action: "digest", profileId: alice.profile.id, content: "Private" } })).status()).toBe(404);
+    expect((await bobRequest.post("/api/auth/login", { data: { email: alice.profile.email, password: "incorrect" } })).status()).toBe(401);
+    expect((await request.get(`/api/state?profile=${alice.profile.id}`).then(r => r.json())).feeds).toEqual(alice.feeds);
+    await request.post("/api/auth/logout");
+    // Replaying a signed-out token must fail even if the cookie is retained.
+    const replay = await playwright.request.newContext({ baseURL: "http://localhost:3217", extraHTTPHeaders: { Cookie: `pulse_session=${cookie.value}` } });
+    expect((await replay.get("/api/state")).status()).toBe(401);
+    await replay.dispose();
+  } finally { await bobRequest.dispose(); }
+});
+
+
+test("background updates keep the reader visible, retain failed feeds, and never overlap", async ({ page, request }) => {
+  const payload = await account(request, "Background reader");
+  payload.feeds = [
+    { title: "Live feed", url: "https://example.com/live", color: "#2563eb" },
+    { title: "Flaky feed", url: "https://example.com/flaky", color: "#2563eb" },
+  ];
+  expect((await request.put("/api/state", { data: payload })).ok()).toBeTruthy();
+  await page.route("**/api/ai?*", route => route.fulfill({ json: { available: true, models: [] } }));
+  let liveRequests = 0;
+  let flakyRequests = 0;
+  let release: () => void = () => {};
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/feed", async route => {
+    const flaky = route.request().postDataJSON().url.endsWith("/flaky");
+    const count = flaky ? ++flakyRequests : ++liveRequests;
+    if (count === 2) await pending;
+    if (flaky && count > 1) return route.fulfill({ status: 503, json: { error: "Unavailable" } });
+    const title = flaky ? "Retained story" : count === 1 ? "Original story" : "New story";
+    return route.fulfill({ json: { title: flaky ? "Flaky feed" : "Live feed", articles: [{
+      title, link: `https://example.com/${title.replaceAll(" ", "-")}`,
+      pubDate: count > 1 ? "2026-11-23T12:00:00Z" : "2026-11-22T12:00:00Z",
+      contentSnippet: `${title} body`, creator: "Author",
+    }] } });
+  });
+  await page.clock.install();
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Original story", exact: true }).first()).toBeVisible();
+  await page.getByRole("button").filter({ has: page.getByRole("heading", { name: "Original story", exact: true }) }).click();
+  const reader = page.getByRole("article");
+  await expect(reader).toContainText("Original story");
+  await page.clock.fastForward(5 * 60 * 1000);
+  await expect.poll(() => liveRequests).toBe(2);
+  await expect.poll(() => flakyRequests).toBe(2);
+  await expect(page.getByRole("button", { name: "Refresh feeds", exact: true })).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByRole("heading", { name: "Original story", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Retained story", exact: true }).first()).toBeVisible();
+  await expect(reader).toContainText("Original story");
+  await page.clock.fastForward(5 * 60 * 1000);
+  await page.evaluate(() => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new Event("online")); });
+  expect(liveRequests).toBe(2);
+  expect(flakyRequests).toBe(2);
+  release();
+  await expect(page.getByRole("heading", { name: "New story", exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Retained story", exact: true }).first()).toBeVisible();
+  await expect(reader).toContainText("Original story");
+  await expect(page.getByRole("button", { name: "Refresh feeds", exact: true })).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByRole("alert").filter({ hasText: "Flaky feed" })).toBeVisible();
+  // Advance the wall clock without running timers, as when a browser suspends a tab.
+  await page.clock.setSystemTime(new Date(Date.now() + 60 * 60 * 1000));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => liveRequests).toBe(3);
+  await expect.poll(() => flakyRequests).toBe(3);
 });

@@ -1,9 +1,12 @@
+import { authorize } from "@/lib/auth";
 import { NextResponse } from "next/server";
 import Parser from "rss-parser";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  const denied = await authorize();
+  if (denied) return denied;
   try {
     const { query } = await request.json();
     if (!query || typeof query !== "string") {
